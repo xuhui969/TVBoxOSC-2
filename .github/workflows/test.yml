@@ -3,10 +3,20 @@ name: Test
 on:
   schedule:
     - cron: 15,45 0-18,22-23 * * *
-  push:
-    branches:
-      - master
   workflow_dispatch:
+    inputs:
+      rebuild:
+        description: '忽略构建记录以重新构建'
+        required: false
+        type: boolean
+      donotpublish:
+        description: '构建后不提交发布新版'
+        required: false
+        type: boolean
+      testOption:
+        description: 'arm64支持，不支持ijk解码'
+        required: false
+        type: boolean
 
 jobs:
   build:
@@ -31,7 +41,7 @@ jobs:
           upStream=https://github.com/${{ matrix.userName }}/${{ matrix.repoName }}
           echo "upStream=$upStream" >> $GITHUB_ENV
           commit=$(curl -sL $upStream/commits/${{ matrix.branchName }} |grep -o "/${{ matrix.userName }}/${{ matrix.repoName }}/commit/[a-z0-9]\+" |head -1 | cut -d\/ -f5)
-          if ! grep -q "$commit" README.md; then
+          if ! grep -q "$commit" README.md || [ "${{ inputs.rebuild }}" == "true" ]; then
             echo "commit=$commit" >> $GITHUB_ENV
             echo "commitS=${commit:0:7}" >> $GITHUB_ENV
           fi
@@ -52,17 +62,25 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.userName }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.userName }}-
-      - name: Add Build Repo
+      - name: Extra Modify
         if: ${{ env.commit }}
         working-directory: TVBoxOSC
         run: |
-          if ! grep -q '9xi4o.tk' build.gradle; then
-            if grep -q 'crosswalk' build.gradle; then
-              sed -i "/crosswalk/a\        maven { url 'http://9xi4o.tk/maven2' }" build.gradle
-            else
-              sed -i "/jitpack.io/a\        maven { url 'http://9xi4o.tk/maven2' }" build.gradle
-            fi
+          echo '修改VersionName'
+          sed -i "/versionName/s#[0-9a-zA-Z_\.\'\"-]\+\$#\'${{ env.tag }}\'#" app/build.gradle
+          echo 'crosswalk源，防挂'
+          if grep -q 'crosswalk' build.gradle; then
+            sed -i "/crosswalk/a\        maven { url 'https://o0halflife0o.github.io/crosswalk/releases/crosswalk/android/maven2' }" build.gradle
+          else
+            sed -i "/jitpack.io/a\        maven { url 'https://o0halflife0o.github.io/crosswalk/releases/crosswalk/android/maven2' }" build.gradle
           fi
+      - name: Option For Test
+        if: ${{ inputs.testOption }}
+        working-directory: TVBoxOSC
+        run: |
+          #添加arm64支持，不支持ijk解码
+          sed -i "/armeabi-v7a[\'\"]$/s#\$#, 'arm64-v8a'#" app/build.gradle
+          sed -i "/armeabi-v7a[\'\"]$/s#\$#, 'arm64-v8a'#" player/build.gradle
       - name: Release Apk Sign
         if: ${{ env.commit }}
         working-directory: TVBoxOSC
@@ -90,7 +108,7 @@ jobs:
           rm -rf apk/
           mkdir -p apk/
           for file in `find ~ -name "*release*.apk" -print`; do
-            mv "$file" apk/TVBox_release_${{ env.tag }}.apk
+            mv "$file" apk/TVBox_${{ matrix.userName }}_${{ env.tag }}.apk
           done
       - name: Upload App To Artifact
         uses: actions/upload-artifact@v3
@@ -98,6 +116,10 @@ jobs:
         with:
           name: ${{ matrix.userName }}-${{ matrix.repoName }}
           path: TVBoxOSC/apk/*
+      - name: Whether Or Not to Publish
+        if: ${{ inputs.donotpublish && env.commit }}
+        run: |
+          echo "commit=" >> $GITHUB_ENV
       - name: Release and Upload Assets
         uses: softprops/action-gh-release@v1
         if: ${{ env.commit }}
@@ -116,7 +138,7 @@ jobs:
         run: |
           if [ -n "${{ secrets.CHANNEL_ID }}" ] && [ -n "${{ secrets.BOT_TOKEN }}" ]; then
             OUTPUT="${{ github.workspace }}/TVBoxOSC/apk/"
-            export appRelease=$(find $OUTPUT -name "*release*.apk")
+            export appRelease=$(find $OUTPUT -name "*${{ matrix.userName }}*.apk")
             export sourceCode="${{ github.workspace }}/TVBoxOSC/${{ env.commitS }}-source.zip"
             lastCommit=$(grep "${{ matrix.userName }}\/${{ matrix.repoName }}" README.md |grep -o '[a-z0-9]\{40\}')
             cd TVBoxOSC
@@ -146,11 +168,12 @@ jobs:
         if: ${{ env.commit }}
         run: |
           rm -rf TVBoxOSC
-          sed -i "/${{ matrix.userName }}\/${{ matrix.repoName }}/s#Updated: [a-zA-Z0-9]*#Updated: ${{ env.commit }}#" README.md
           sed -i '/url =/d' ./.git/config
           git config --local user.name "github-actions[bot]"
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url --add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          git pull --rebase
+          sed -i "/${{ matrix.userName }}\/${{ matrix.repoName }}/s#Updated: [a-zA-Z0-9]*#Updated: ${{ env.commit }}#" README.md
           git add --all
           git commit -m "${{ env.commit }}"
           git push -u -f origin master
